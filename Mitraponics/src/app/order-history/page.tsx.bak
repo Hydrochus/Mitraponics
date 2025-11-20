@@ -1,0 +1,708 @@
+"use client";
+
+import React, { useState, useEffect } from 'react';
+import Link from 'next/link';
+import { useUserAuth } from '@/context/UserAuthContext';
+import { useRouter } from 'next/navigation';
+import axios, { AxiosError } from 'axios';
+import { ordersApi } from '@/services/api';
+
+interface OrderItem {
+  id: number;
+  product_name: string;
+  price: number;
+  quantity: number;
+}
+
+interface Order {
+  id: string;
+  order_number: string;
+  created_at: string;
+  total: number;
+  items: OrderItem[];
+  status: 'processing' | 'shipped' | 'delivered' | 'cancelled' | 'pending';
+  payment_method: string;
+}
+
+export default function OrderHistory() {
+  const { user, isAuthenticated, loading } = useUserAuth();
+  const router = useRouter();
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [loadingOrders, setLoadingOrders] = useState(true);
+  const [cancelingOrderId, setCancelingOrderId] = useState<string | null>(null);
+  const [showCancelModal, setShowCancelModal] = useState(false);
+  const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  const [cancelReason, setCancelReason] = useState('');
+  const [otherReason, setOtherReason] = useState('');
+  const [cachedToken, setCachedToken] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
+
+  // Redirect if not authenticated
+  useEffect(() => {
+    if (!loading && !isAuthenticated) {
+      // Instead of immediately redirecting, set a flag to show a login prompt
+      console.log("Not authenticated - will show login prompt in the UI");
+      // We won't redirect right away to allow for better UX
+    }
+  }, [loading, isAuthenticated, router]);
+
+  // Get authentication token once when component mounts
+  useEffect(() => {
+    const getAuthToken = () => {
+      try {
+        // Don't try to get token if not authenticated
+        if (!isAuthenticated) {
+          console.log("Not authenticated, clearing token cache");
+          setCachedToken(null);
+          return;
+        }
+        
+        // Try to get from cookie
+        const cookieToken = document.cookie.split('; ')
+          .find(row => row.startsWith('userToken='))
+          ?.split('=')[1];
+        
+        // If not in cookie, try localStorage
+        const localToken = localStorage.getItem('userToken');
+        
+        const token = cookieToken || localToken;
+        
+        if (token) {
+          console.log("Token found and cached in order history");
+          setCachedToken(token);
+          return;
+        } else {
+          console.warn("No authentication token found even though user is authenticated");
+          setCachedToken(null);
+        }
+      } catch (error) {
+        console.error("Error getting token:", error);
+        setCachedToken(null);
+      }
+    };
+    
+    getAuthToken();
+    
+    // Set up token refresh interval - check every 5 seconds while the component is mounted
+    const tokenRefreshInterval = setInterval(() => {
+      if (isAuthenticated && user) {
+        getAuthToken();
+      }
+    }, 5000);
+    
+    return () => {
+      clearInterval(tokenRefreshInterval);
+    };
+  }, [isAuthenticated, user]); // Run when authentication state or user changes
+
+  useEffect(() => {
+    // Function to fetch orders from backend
+    const fetchOrders = async () => {
+      if (!isAuthenticated || !user) {
+        console.log("Not authenticated or no user, showing empty order history");
+        setOrders([]);
+        setLoadingOrders(false);
+        return;
+      }
+      
+      setLoadingOrders(true);
+      try {
+        console.log("Authenticated as:", user.name, "with ID:", user.id);
+        
+        // Refresh token from storage to ensure it's the most current
+        let token = null;
+        try {
+          // Try to get from cookie
+          const cookieToken = document.cookie.split('; ')
+            .find(row => row.startsWith('userToken='))
+            ?.split('=')[1];
+          
+          // If not in cookie, try localStorage
+          const localToken = localStorage.getItem('userToken');
+          
+          token = cookieToken || localToken || cachedToken;
+          
+          if (token) {
+            console.log("Token found for user order fetch");
+            setCachedToken(token); // Update cached token
+          } else {
+            console.warn("No authentication token found for authenticated user");
+            // Display orders UI anyway, but with empty orders
+            setOrders([]);
+            setLoadingOrders(false);
+            return;
+          }
+        } catch (tokenError) {
+          console.error("Error retrieving authentication token:", tokenError);
+          setOrders([]);
+          setLoadingOrders(false);
+          return;
+        }
+        
+        // Create headers with token
+        const headers: Record<string, string> = {
+          'Accept': 'application/json',
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        };
+        
+        // Fetch user-specific orders
+        try {
+          const response = await axios.get('http://localhost:8000/api/user/orders', { headers });
+          
+          if (response.status === 200) {
+            console.log("User orders fetched successfully:", response.data.orders?.length || 0, "orders");
+            setOrders(response.data.orders || []);
+            setAuthError(null); // Clear any previous auth errors on successful fetch
+          } else {
+            console.error('Failed to fetch user orders:', response.status);
+            setOrders([]);
+          }
+        } catch (authError: any) {
+          console.error("Error fetching authenticated orders:", authError.message || authError);
+          
+          // If we get a 401 Unauthorized error, the token might be invalid
+          if (authError.response && authError.response.status === 401) {
+            console.warn("Authentication token invalid or expired");
+            // Clear invalid token from storage
+            document.cookie = 'userToken=; path=/; expires=Thu, 01 Jan 1970 00:00:00 GMT; SameSite=Lax';
+            localStorage.removeItem('userToken');
+            setCachedToken(null);
+            setAuthError("Your session has expired. Please refresh the page or log in again.");
+          } else {
+            setAuthError("Couldn't connect to the server. Please try again later.");
+          }
+          
+          setOrders([]);
+        }
+      } catch (error) {
+        console.error('Error in order fetching process:', error);
+        setOrders([]);
+      }
+      setLoadingOrders(false);
+    };
+    
+    // Add event listener for storage changes
+    const handleStorageChange = () => {
+      if (localStorage.getItem('orderUpdated')) {
+        fetchOrders();
+        localStorage.removeItem('orderUpdated');
+      }
+    };
+    
+    window.addEventListener('storage', handleStorageChange);
+    
+    // Only fetch orders if user is authenticated
+    if (isAuthenticated && user && !loading) {
+      fetchOrders();
+    }
+    
+    return () => {
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, [isAuthenticated, user, loading]);
+
+  // Function to determine the status badge color
+  const getStatusColor = (status: string) => {
+    switch (status) {
+      case 'processing':
+        return 'bg-yellow-100 text-yellow-800';
+      case 'shipped':
+        return 'bg-blue-100 text-blue-800';
+      case 'delivered':
+        return 'bg-green-100 text-green-800';
+      case 'cancelled':
+        return 'bg-red-100 text-red-800';
+      default:
+        return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  // Function to format payment method
+  const formatPaymentMethod = (method: string) => {
+    if (method === 'cod') return 'Cash on Delivery';
+    if (method === 'card') return 'Credit Card';
+    return method;
+  };
+
+  // Function to format date from ISO format
+  const formatDate = (dateString: string) => {
+    const date = new Date(dateString);
+    return date.toLocaleDateString('id-ID', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    });
+  };
+
+  // Function to count total items in an order
+  const countItems = (items: OrderItem[]) => {
+    return items ? items.reduce((sum, item) => sum + item.quantity, 0) : 0;
+  };
+
+  // Function to open cancel modal for a specific order
+  const openCancelModal = (orderId: string) => {
+    setSelectedOrderId(orderId);
+    setCancelReason('');
+    setOtherReason('');
+    setShowCancelModal(true);
+  };
+
+  // Function to handle order cancellation
+  const handleCancelOrder = async () => {
+    if (!selectedOrderId) return;
+    
+    // Validate reason
+    if (!cancelReason) {
+      alert('Please select a reason for cancellation');
+      return;
+    }
+    
+    if (cancelReason === 'other' && !otherReason.trim()) {
+      alert('Please provide details for your cancellation reason');
+      return;
+    }
+    
+    try {
+      setCancelingOrderId(selectedOrderId);
+      const finalReason = cancelReason === 'other' ? otherReason : cancelReason;
+      
+      // Get the authentication token
+      const token = cachedToken;
+        
+      if (!token) {
+        console.error('No authentication token found');
+        return;
+      }
+      
+      // Make the cancellation request
+      const response = await axios.put(`http://localhost:8000/api/user/orders/${selectedOrderId}/cancel`, 
+        { cancel_reason: finalReason },
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+      
+      if (response && response.data) {
+        // Update the order in the local state
+        setOrders(prevOrders => 
+          prevOrders.map(order => 
+            order.id === selectedOrderId 
+              ? { ...order, status: 'cancelled' } 
+              : order
+          )
+        );
+        
+        // Close modal and show success message
+        setShowCancelModal(false);
+        alert('Order cancelled successfully');
+      }
+    } catch (error) {
+      console.error('Error cancelling order:', error);
+      let errorMsg = 'Failed to cancel order. Please try again.';
+      
+      try {
+        const axiosError = error as AxiosError;
+        if (axiosError.response) {
+          // The server responded with an error status
+          errorMsg += ` Server response: ${JSON.stringify(axiosError.response.data || {})}`;
+          console.log('Error response data:', axiosError.response.data);
+          console.log('Error response status:', axiosError.response.status);
+        } else if (axiosError.request) {
+          // The request was made but no response received
+          errorMsg += ' No response received from server. Please check your internet connection.';
+        } else {
+          // Something happened in setting up the request
+          errorMsg += ` ${axiosError.message}`;
+        }
+      } catch (jsonError) {
+        errorMsg += ' Error parsing error details.';
+      }
+      
+      alert(errorMsg);
+    } finally {
+      setCancelingOrderId(null);
+    }
+  };
+
+  // Add a function to manually refresh the orders
+  const refreshOrders = () => {
+    setAuthError(null);
+    setLoadingOrders(true);
+    fetchOrders();
+  };
+
+  // If loading authentication state, show loading indicator
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gray-100 py-8 flex justify-center items-center">
+        <div className="text-lg">Loading...</div>
+      </div>
+    );
+  }
+
+  // UI for non-authenticated users
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-gray-100 py-8">
+        <div className="container mx-auto px-4">
+          <h1 className="text-3xl font-semibold mb-6">Order History</h1>
+          
+          <div className="bg-white rounded-lg shadow p-8 text-center">
+            <h2 className="text-xl font-medium mb-3">Please log in to view your orders</h2>
+            <p className="text-gray-600 mb-6">
+              You need to be logged in to view your order history. 
+              {orders.length > 0 && " However, we found some orders that might be yours."}
+            </p>
+            <div className="flex justify-center space-x-4">
+              <Link 
+                href="/login" 
+                className="bg-teal-200 text-black px-6 py-3 rounded-lg font-medium hover:bg-teal-300 transition"
+              >
+                Log In
+              </Link>
+              <Link 
+                href="/register" 
+                className="bg-gray-200 text-black px-6 py-3 rounded-lg font-medium hover:bg-gray-300 transition"
+              >
+                Register
+              </Link>
+            </div>
+          </div>
+          
+          {orders.length > 0 && (
+            <div className="mt-8">
+              <div className="bg-teal-50 border-l-4 border-teal-400 p-4 mb-6">
+                <p className="text-teal-700">
+                  We found some recent orders. Log in to manage these orders and see your complete order history.
+                </p>
+              </div>
+              
+              {/* Display the orders table just like in the authenticated view */}
+              <div className="space-y-6">
+                <div className="bg-white rounded-lg shadow-md overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="min-w-full divide-y divide-gray-200">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Order Number
+                          </th>
+                          <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Date
+                          </th>
+                          <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Total
+                          </th>
+                          <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Items
+                          </th>
+                          <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Payment
+                          </th>
+                          <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Status
+                          </th>
+                          <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                            Actions
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="bg-white divide-y divide-gray-200">
+                        {orders.map(order => (
+                          <tr key={order.id}>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                              #{order.order_number}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              {formatDate(order.created_at)}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                              Rp {order.total.toLocaleString('id-ID')}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              {countItems(order.items)} {countItems(order.items) === 1 ? 'item' : 'items'}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                              {formatPaymentMethod(order.payment_method)}
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap">
+                              <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusColor(order.status)}`}>
+                                {order.status.charAt(0).toUpperCase() + order.status.slice(1)}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                              <Link href={`/order-details/${order.id}`} className="text-teal-600 hover:text-teal-900 mr-4">
+                                View
+                              </Link>
+                              {order.status === 'processing' && (
+                                <button 
+                                  className="text-red-600 hover:text-red-900"
+                                  onClick={() => openCancelModal(order.id)}
+                                  disabled={cancelingOrderId === order.id}
+                                >
+                                  {cancelingOrderId === order.id ? 'Cancelling...' : 'Cancel'}
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // Original return for authenticated users
+  return (
+    <div className="min-h-screen bg-gray-100 py-8">
+      {/* Cancel Order Modal */}
+      {showCancelModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg max-w-md w-full p-6 shadow-xl">
+            <h3 className="text-xl font-semibold mb-4">Cancel Order</h3>
+            <p className="text-gray-600 mb-4">
+              Please tell us why you're cancelling this order:
+            </p>
+            
+            <div className="space-y-3 mb-6">
+              <div className="flex items-center">
+                <input 
+                  type="radio" 
+                  id="reason-mistake" 
+                  name="cancelReason"
+                  value="Ordered by mistake"
+                  checked={cancelReason === "Ordered by mistake"}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  className="mr-3"
+                />
+                <label htmlFor="reason-mistake">Ordered by mistake</label>
+              </div>
+              
+              <div className="flex items-center">
+                <input 
+                  type="radio" 
+                  id="reason-shipping" 
+                  name="cancelReason"
+                  value="Shipping takes too long"
+                  checked={cancelReason === "Shipping takes too long"}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  className="mr-3"
+                />
+                <label htmlFor="reason-shipping">Shipping takes too long</label>
+              </div>
+              
+              <div className="flex items-center">
+                <input 
+                  type="radio" 
+                  id="reason-price" 
+                  name="cancelReason"
+                  value="Found a better price elsewhere"
+                  checked={cancelReason === "Found a better price elsewhere"}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  className="mr-3"
+                />
+                <label htmlFor="reason-price">Found a better price elsewhere</label>
+              </div>
+              
+              <div className="flex items-center">
+                <input 
+                  type="radio" 
+                  id="reason-payment" 
+                  name="cancelReason"
+                  value="Payment issues"
+                  checked={cancelReason === "Payment issues"}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  className="mr-3"
+                />
+                <label htmlFor="reason-payment">Payment issues</label>
+              </div>
+              
+              <div className="flex items-center">
+                <input 
+                  type="radio" 
+                  id="reason-other" 
+                  name="cancelReason"
+                  value="other"
+                  checked={cancelReason === "other"}
+                  onChange={(e) => setCancelReason(e.target.value)}
+                  className="mr-3"
+                />
+                <label htmlFor="reason-other">Other reason</label>
+              </div>
+              
+              {cancelReason === 'other' && (
+                <div className="ml-6 mt-2">
+                  <textarea
+                    value={otherReason}
+                    onChange={(e) => setOtherReason(e.target.value)}
+                    placeholder="Please specify your reason..."
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md"
+                    rows={3}
+                  />
+                </div>
+              )}
+            </div>
+            
+            <div className="flex justify-end space-x-3">
+              <button 
+                className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+                onClick={() => setShowCancelModal(false)}
+              >
+                Nevermind
+              </button>
+              <button 
+                className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 disabled:opacity-50"
+                onClick={handleCancelOrder}
+                disabled={cancelingOrderId === selectedOrderId}
+              >
+                {cancelingOrderId === selectedOrderId ? 'Processing...' : 'Confirm Cancellation'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="container mx-auto px-4">
+        <h1 className="text-3xl font-semibold mb-6">My Order History</h1>
+        
+        {user && (
+          <p className="text-gray-600 mb-4">Showing orders for {user.name} ({user.email})</p>
+        )}
+        
+        {/* Authentication error message */}
+        {authError && (
+          <div className="mb-6 bg-red-50 border-l-4 border-red-400 p-4">
+            <div className="flex">
+              <div className="flex-shrink-0">
+                <svg className="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                </svg>
+              </div>
+              <div className="ml-3">
+                <p className="text-sm text-red-700">{authError}</p>
+                <div className="mt-2">
+                  <button 
+                    className="bg-red-100 hover:bg-red-200 text-red-800 px-3 py-1 rounded text-xs font-medium"
+                    onClick={refreshOrders}
+                  >
+                    Refresh
+                  </button>
+                  <Link 
+                    href="/login" 
+                    className="ml-2 bg-teal-100 hover:bg-teal-200 text-teal-800 px-3 py-1 rounded text-xs font-medium"
+                  >
+                    Log in again
+                  </Link>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        {loadingOrders ? (
+          <div className="flex justify-center items-center py-12">
+            <div className="text-lg">Loading your orders...</div>
+          </div>
+        ) : orders.length === 0 ? (
+          <div className="bg-white rounded-lg shadow p-8 text-center">
+            <h2 className="text-xl font-medium mb-3">You haven't placed any orders yet</h2>
+            <p className="text-gray-600 mb-6">
+              Browse our products and place your first order today!
+            </p>
+            <Link 
+              href="/products" 
+              className="bg-teal-200 text-black px-6 py-3 rounded-lg font-medium hover:bg-teal-300 transition"
+            >
+              Shop Now
+            </Link>
+          </div>
+        ) : (
+          <div className="space-y-6">
+            <div className="bg-white rounded-lg shadow-md overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="min-w-full divide-y divide-gray-200">
+                  <thead className="bg-gray-50">
+                    <tr>
+                      <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Order Number
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Date
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Total
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Items
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Payment
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Status
+                      </th>
+                      <th className="px-6 py-4 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Actions
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="bg-white divide-y divide-gray-200">
+                    {orders.map(order => (
+                      <tr key={order.id}>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900">
+                          #{order.order_number}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          {formatDate(order.created_at)}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
+                          Rp {order.total.toLocaleString('id-ID')}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          {countItems(order.items)} {countItems(order.items) === 1 ? 'item' : 'items'}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                          {formatPaymentMethod(order.payment_method)}
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <span className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${getStatusColor(order.status)}`}>
+                            {order.status.charAt(0).toUpperCase() + order.status.slice(1)}
+                          </span>
+                        </td>
+                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
+                          <Link href={`/order-details/${order.id}`} className="text-teal-600 hover:text-teal-900 mr-4">
+                            View
+                          </Link>
+                          {order.status === 'processing' && (
+                            <button 
+                              className="text-red-600 hover:text-red-900"
+                              onClick={() => openCancelModal(order.id)}
+                              disabled={cancelingOrderId === order.id}
+                            >
+                              {cancelingOrderId === order.id ? 'Cancelling...' : 'Cancel'}
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}

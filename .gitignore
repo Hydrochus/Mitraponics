@@ -1,0 +1,70 @@
+# Dependencies
+node_modules/
+vendor/
+**/node_modules/
+**/vendor/
+
+# Large archive files
+*.rar
+*.zip
+*.7z
+*.tar.gz
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.production
+**/.env*
+
+# Build outputs
+.next/
+**/.next/
+out/
+dist/
+build/
+*.log
+
+# Laravel specific
+**/storage/*.key
+**/storage/logs/*
+**/storage/framework/cache/*
+**/storage/framework/sessions/*
+**/storage/framework/views/*
+**/bootstrap/cache/*
+
+# PHP
+.phpunit.result.cache
+Homestead.json
+Homestead.yaml
+auth.json
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# Testing
+coverage/
+.nyc_output/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.cache
